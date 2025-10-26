@@ -107,7 +107,9 @@ class SDKBaseClient:
         if self.timeout < 1:
             raise ValueError("Timeout value must be at least 1 second")
 
-    def _call(self, url: str, method: str, params: list[Any], context: dict[str, Any] | None):
+    def _call(
+        self, url: str, method: str, params: list[Any], context: dict[str, Any] | None = None
+    ):
         arg_hash = {"method": method,
                     "params": params,
                     "version": "1.1",
@@ -149,6 +151,21 @@ class SDKBaseClient:
             return resp["result"][0]
         return resp["result"]
 
+    def _get_service_url(self, service_method: str, service_version: str | None):
+        if not self.lookup_url:
+            return self.url
+        service = service_method.split(".")[0]
+        service_status_ret = self._call(
+            self.url, "ServiceWizard.get_service_status",
+            [{"module_name": service, "version": service_version}]
+        )
+        return service_status_ret["url"]
+
+    def _set_up_context(self, service_ver: str = None):
+        if service_ver:
+            return {"service_ver": service_ver}
+        return None
+
     def call_method(self, service_method: str, args: list[Any], *, service_ver: str | None = None):
         """
         Call a standard or dynamic service synchronously.
@@ -159,8 +176,6 @@ class SDKBaseClient:
         service_ver - the version of the service to run, e.g. a git hash
             or dev/beta/release.
         """
-        # TDOO NEXT implement dynamic methods
-        #url = self._get_service_url(service_method, service_ver)
-        #context = self._set_up_context(service_ver)
-        url = self.url
-        return self._call(url, service_method, args, None)
+        url = self._get_service_url(service_method, service_ver)
+        context = self._set_up_context(service_ver)
+        return self._call(url, service_method, args, context)
