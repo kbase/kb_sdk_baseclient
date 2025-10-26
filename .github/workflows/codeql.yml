@@ -11,7 +11,6 @@ on:
     # run workflow when merging to main or develop
     branches:
       - main
-      - master
       - develop
 
 jobs:
