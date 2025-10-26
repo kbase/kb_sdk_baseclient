@@ -1,0 +1,5 @@
+[kbase_sdk_baseclient_tests]
+# The url for the environment to test against.
+test_url=https://ci.kbase.us/
+# A valid token for the environment.
+test_token=
