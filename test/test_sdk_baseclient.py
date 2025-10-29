@@ -213,3 +213,41 @@ def test_missing_error_key(mockserver):
     )
     assert got.value.code == 0
     assert got.value.data == ""
+
+
+###
+# Dynamic service tests
+# 
+# All of the 3 ways of calling services use the same underlying _call method, so we don't
+# reiterate those tests every time.
+###
+
+def test_dynamic_service(url_and_token):
+    bc = sdk_baseclient.SDKBaseClient(
+        url_and_token[0] + "/services/service_wizard", lookup_url=True
+    )
+    res = bc.call_method("HTMLFileSetServ.status", [])
+    del res["git_commit_hash"]
+    ver = res["version"]
+    del res["version"]
+    assert res == {
+        'git_url': 'https://github.com/kbaseapps/HTMLFileSetServ',
+        'message': '',
+        'state': 'OK',
+    }
+    assert semver.Version.parse(ver) > semver.Version.parse("0.0.8")
+
+
+def test_dynamic_service_with_service_version(url_and_token):
+    # Current version of HFS is 0.0.9 everywhere
+    bc = sdk_baseclient.SDKBaseClient(
+        url_and_token[0] + "/services/service_wizard", lookup_url=True
+    )
+    res = bc.call_method("HTMLFileSetServ.status", [], service_ver="0.0.8")
+    del res["git_commit_hash"]
+    assert res == {
+        'git_url': 'https://github.com/kbaseapps/HTMLFileSetServ',
+        'message': '',
+        'state': 'OK',
+        "version": "0.0.8"
+    }
