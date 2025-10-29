@@ -35,6 +35,8 @@ code and tests to determine proper useage.
 
 ### Testing
 
+Copy `test.cfg.example` to `test.cfg` and fill it in appropriately.
+
 ```
 uv sync --dev  # only required on first run or when the uv.lock file changes
 PYTHONPATH=src uv run pytest test

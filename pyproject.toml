@@ -27,6 +27,7 @@ dev = [
     "ipython==9.6.0",
     "pytest==8.4.2",
     "pytest-cov==7.0.0",
+    "semver>=3.0.4",
 ]
 
 [project.urls]
