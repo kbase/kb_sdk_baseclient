@@ -4,6 +4,7 @@ import json
 import os
 import pytest
 import re
+import requests
 from requests.exceptions import HTTPError, ReadTimeout
 import semver
 import shutil
@@ -61,6 +62,26 @@ def mockserver():
     server.shutdown()
 
 
+def _wait_for_callback(callback_url: str):
+    interval = 1
+    limit = 120
+    start = time.monotonic()
+    err = None
+    print("waiting for callback server to start")
+    while time.monotonic() - start < limit:
+        try:
+            res = requests.get(callback_url)
+            restext = res.text
+            if res.status_code == 200 and res.text == "[{}]":
+                print(f"Callback server is up at {callback_url}")
+                return
+        except Exception as e:
+            err = e
+        print("waiting for CBS")
+        time.sleep(interval)
+    raise IOError(f"Callback server did not start, last response: {restext}") from err
+
+
 @pytest.fixture(scope="module")
 def callback(url_and_token):
     # Tried using the temp path pytest fixture but kept getting lots of warnings
@@ -85,10 +106,11 @@ def callback(url_and_token):
         _CALLBACK_SERVER_IMAGE
     ]
     proc = subprocess.Popen(dockercmd)
+    callback_url = f"http://localhost:{_CALLBACK_SERVER_PORT}"
+    _wait_for_callback(callback_url)
 
     try:
-        time.sleep(3)
-        yield f"http://localhost:{_CALLBACK_SERVER_PORT}"
+        yield callback_url
     finally:
         subprocess.check_call(["docker", "stop", container_name])
         proc.wait(timeout=10)
