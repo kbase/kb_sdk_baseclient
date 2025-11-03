@@ -7,7 +7,10 @@ import random as _random
 import requests as _requests
 import os as _os
 from urllib.parse import urlparse as _urlparse
+import time as _time
+import traceback as _traceback
 from typing import Any
+from urllib3.exceptions import ProtocolError as _ProtocolError
 
 
 # The first version is a pretty basic port from the old baseclient, removing some no longer
@@ -17,10 +20,18 @@ from typing import Any
 __version__ = "0.1.0"
 
 
+_EXP_BACKOFF_SEC = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 60, 120, 300]
 _CT = "content-type"
 _AJ = "application/json"
 _URL_SCHEME = frozenset(["http", "https"])
 _CHECK_JOB_RETRIES = 3
+
+
+# tested this manually by shortening _EXP_BACKOFF_MS and adding printouts below
+def _get_next_backoff(backoff_index: int = 1):
+    if backoff_index < len(_EXP_BACKOFF_SEC) - 1:
+        backoff_index += 1
+    return backoff_index, _EXP_BACKOFF_SEC[backoff_index]
 
 
 class ServerError(Exception):
@@ -58,18 +69,12 @@ class SDKBaseClient:
         For SDK methods: the url of the callback service.
         For SDK dynamic services: the url of the Service Wizard.
         For other services: the url of the service.
-    timeout - methods will fail if they take longer than this value in seconds.
+    timeout - http requests will fail if they take longer than this value in seconds.
         Default 1800.
     token - a KBase authentication token.
     trust_all_ssl_certificates - set to True to trust self-signed certificates.
         If you don't understand the implications, leave as the default, False.
     lookup_url - set to true when contacting KBase dynamic services.
-    async_job_check_time_ms - the wait time between checking job state for
-        asynchronous jobs run with the run_job method.
-    async_job_check_time_scale_percent - the percentage increase in wait time between async job
-        check attempts.
-    async_job_check_max_time_ms - the maximum time to wait for a job check attempt before
-        failing.
     """
     def __init__(
             self,
@@ -79,9 +84,6 @@ class SDKBaseClient:
             token: str = None,
             trust_all_ssl_certificates: bool = False,  # Too much of a pain to test
             lookup_url: bool = False,
-            async_job_check_time_ms: int = 100,
-            async_job_check_time_scale_percent: int = 150,
-            async_job_check_max_time_ms: int = 300000
         ):
         if url is None:
             raise ValueError("A url is required")
@@ -93,9 +95,6 @@ class SDKBaseClient:
         self._headers = {}
         self.trust_all_ssl_certificates = trust_all_ssl_certificates
         self.lookup_url = lookup_url
-        self.async_job_check_time = async_job_check_time_ms / 1000.0
-        self.async_job_check_time_scale_percent = async_job_check_time_scale_percent
-        self.async_job_check_max_time = async_job_check_max_time_ms / 1000.0
         self.token = None
         if token is not None:
             self.token = token
@@ -166,7 +165,48 @@ class SDKBaseClient:
             return {"service_ver": service_ver}
         return None
 
-    def call_method(self, service_method: str, args: list[Any], *, service_ver: str | None = None):
+    def _check_job(self, service: str, job_id: str):
+        return self._call(self.url, service + "._check_job", [job_id])
+
+    def _submit_job(self, service_method: str, args: list[Any], service_ver: str = None):
+        context = self._set_up_context(service_ver)
+        mod, meth = service_method.split(".")
+        return self._call(self.url, mod + "._" + meth + "_submit", args, context)
+
+    def run_job(self, service_method: str, args: list[Any], service_ver: str = None):
+        """
+        Run a SDK method asynchronously.
+        Required arguments:
+        service_method - the service and method to run, e.g. myserv.mymeth.
+        args - a list of arguments to the method.
+        Optional arguments:
+        service_ver - the version of the service to run, e.g. a git hash
+            or dev/beta/release.
+        """
+        mod = service_method.split(".")[0]
+        job_id = self._submit_job(service_method, args, service_ver)
+        backoff_index = -1
+        check_job_failures = 0
+        while check_job_failures < _CHECK_JOB_RETRIES:
+            backoff_index, backoff = _get_next_backoff(backoff_index)
+            _time.sleep(backoff)
+            try:
+                job_state = self._check_job(mod, job_id)
+            except (ConnectionError, _ProtocolError):
+                _traceback.print_exc()
+                check_job_failures += 1
+            else:
+                if job_state["finished"]:
+                    if not job_state["result"]:
+                        return None
+                    if len(job_state["result"]) == 1:
+                        return job_state["result"][0]
+                    return job_state["result"]
+        raise RuntimeError(f"_check_job failed {check_job_failures} times and exceeded limit")
+
+    def call_method(
+        self, service_method: str, args: list[Any], *, service_ver: str | None = None
+    ):
         """
         Call a standard or dynamic service synchronously.
         Required arguments:

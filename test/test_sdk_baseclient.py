@@ -6,14 +6,21 @@ import pytest
 import re
 from requests.exceptions import HTTPError, ReadTimeout
 import semver
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
+from urllib3.exceptions import ProtocolError
 
 from kbase import sdk_baseclient
 
 
 _VERSION = "0.1.0"
-_MOCKSERVER_PORT = 31590  # should be fine, find an empty port otherwise
+# should be fine, find an empty ports otherwise
+_MOCKSERVER_PORT = 31590
+_CALLBACK_SERVER_PORT = 31591
+_CALLBACK_SERVER_IMAGE = "ghcr.io/kbase/jobrunner:pr-116"
 
 
 @pytest.fixture(scope="module")
@@ -52,6 +59,51 @@ def mockserver():
     yield f"http://localhost:{_MOCKSERVER_PORT}"
     
     server.shutdown()
+
+
+@pytest.fixture(scope="module")
+def callback(url_and_token):
+    # Tried using the temp path pytest fixture but kept getting lots of warnings
+    tmpdir = tempfile.mkdtemp(prefix="callback_server_data_")
+    container_name = f"sdk_baseclient_test_{str(time.time()).replace('.', '_')}"
+    dockercmd = [
+        "docker", "run",
+        "--platform=linux/amd64",  # until we have multiarch images
+        "--name", container_name,
+        "--rm",
+        # TODO SECURITY when CBS allows, use a file instead
+        #               https://github.com/kbase/JobRunner/issues/90
+        "-e", f"KB_AUTH_TOKEN={url_and_token[1]}",
+        "-e", f"KB_BASE_URL={url_and_token[0]}/services/",
+        "-e", f"JOB_DIR={tmpdir}",
+        "-e", "CALLBACK_IP=localhost",
+        "-e", f"CALLBACK_PORT={_CALLBACK_SERVER_PORT}",
+        "-e", "DEBUG_RUNNER=true", # prints logs from containers
+        "-v", "/var/run/docker.sock:/run/docker.sock",
+        "-v", f"{tmpdir}:{tmpdir}",
+        "-p", f"{_CALLBACK_SERVER_PORT}:{_CALLBACK_SERVER_PORT}",
+        _CALLBACK_SERVER_IMAGE
+    ]
+    proc = subprocess.Popen(dockercmd)
+
+    try:
+        time.sleep(3)
+        yield f"http://localhost:{_CALLBACK_SERVER_PORT}"
+    finally:
+        subprocess.check_call(["docker", "stop", container_name])
+        proc.wait(timeout=10)
+        dockercmd = [
+            "docker", "run",
+            "--platform=linux/amd64",  # until we have multiarch images
+            "--name", container_name,
+            "--rm",
+            "-v", f"{tmpdir}:{tmpdir}",
+            "--entrypoint", "bash",
+            _CALLBACK_SERVER_IMAGE,
+            "-c", f"rm -rf {tmpdir}/*",  # need to use bash for the globbing
+        ]
+        subprocess.check_call(dockercmd)
+        shutil.rmtree(tmpdir)
 
 
 def test_version():
@@ -231,9 +283,9 @@ def test_dynamic_service(url_and_token):
     ver = res["version"]
     del res["version"]
     assert res == {
-        'git_url': 'https://github.com/kbaseapps/HTMLFileSetServ',
-        'message': '',
-        'state': 'OK',
+        "git_url": "https://github.com/kbaseapps/HTMLFileSetServ",
+        "message": "",
+        "state": "OK",
     }
     assert semver.Version.parse(ver) > semver.Version.parse("0.0.8")
 
@@ -246,8 +298,74 @@ def test_dynamic_service_with_service_version(url_and_token):
     res = bc.call_method("HTMLFileSetServ.status", [], service_ver="0.0.8")
     del res["git_commit_hash"]
     assert res == {
-        'git_url': 'https://github.com/kbaseapps/HTMLFileSetServ',
-        'message': '',
-        'state': 'OK',
+        "git_url": "https://github.com/kbaseapps/HTMLFileSetServ",
+        "message": "",
+        "state": "OK",
         "version": "0.0.8"
     }
+
+
+###
+# Async job tests
+# 
+# All of the 3 ways of calling services use the same underlying _call method, so we don't
+# reiterate those tests every time.
+###
+
+
+def test_run_job_with_service_ver(url_and_token, callback):
+    bc = sdk_baseclient.SDKBaseClient(callback, token=url_and_token[1], timeout=10)
+    res = bc.run_job(
+        "njs_sdk_test_2.run",
+        # force backoff with a wait
+        [{"id": "simplejob2", "wait": 1}],
+        # it seems semvers don't work for unreleased modules
+        service_ver="9d6b868bc0bfdb61c79cf2569ff7b9abffd4c67f"
+    )
+    assert res == {
+        "id": "simplejob2",
+        "name": "njs_sdk_test_2",
+        "hash": "9d6b868bc0bfdb61c79cf2569ff7b9abffd4c67f",
+        "wait": 1,
+    }
+
+
+def test_run_job_no_return(url_and_token, callback):
+    bc = sdk_baseclient.SDKBaseClient(callback, token=url_and_token[1], timeout=10)
+    res = bc.run_job("HelloServiceDeluxe.how_rude", ["Georgette"])
+    assert res is None
+
+
+def test_run_job_list_return(url_and_token, callback):
+    # Not many SDK functions that return lists, so we test it here for core / dynamic / SDK
+    # methods
+    bc = sdk_baseclient.SDKBaseClient(callback, token=url_and_token[1], timeout=10)
+    res = bc.run_job("HelloServiceDeluxe.say_hellos", ["JimBob", "Gengulphus"])
+    assert res == [
+        'Hi JimBob, you santimonious lickspittle', # the dork that wrote this module can't spell
+        'Hi Gengulphus, what a lovely and scintillating person you are',
+    ]
+
+
+def test_run_job_failure(url_and_token, callback, requests_mock):
+    requests_mock.post(callback, [
+        {"json": {"result": ["job_id"]}},
+        {"exc": ConnectionError("oopsie")},
+        {"exc": ProtocolError("oh dang")},
+        {"exc": ConnectionError("so unreliable omg")},
+    ])
+    bc = sdk_baseclient.SDKBaseClient(callback, token=url_and_token[1], timeout=10)
+    with pytest.raises(RuntimeError, match="_check_job failed 3 times and exceeded limit"):
+        bc.run_job("HelloServiceDeluxe.say_hellos", ["JimBob"])
+
+
+def test_run_job_failure_recovery(url_and_token, callback, requests_mock):
+    requests_mock.post(callback, [
+        {"json": {"result": ["job_id"]}},
+        {"exc": ConnectionError("oopsie")},
+        {"exc": ProtocolError("oh dang")},
+        {"json": {"result": [{"finished": 1, "result": ["meh"]}]}},
+    ])
+    bc = sdk_baseclient.SDKBaseClient(callback, token=url_and_token[1], timeout=10)
+    res = bc.run_job("HelloServiceDeluxe.say_hellos", ["JimBob"])
+    assert res == "meh"
