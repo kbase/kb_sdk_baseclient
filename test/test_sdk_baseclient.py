@@ -156,6 +156,7 @@ def test_call_method_basic_passed_token(url_and_token):
 
 
 def test_call_method_basic_env_token(url_and_token):
+    # Tests returning a single value
     os.environ["KB_AUTH_TOKEN"] = url_and_token[1]
     try:
         _test_call_method_basic(url_and_token[0] + "/services/ws", None)
@@ -177,12 +178,11 @@ def _test_call_method_basic(url: str, token: str |  None):
         assert res is None
 
 
-def test_serialize_sets_and_list_return(url_and_token):
-    """
-    Tests
-    * Serializing set and frozenset
-    * Methods that return a list vs. a single value (save_objects).
-    """
+# TODO add test for service that returns > 1 value. Not sure if any services do this
+
+
+def test_serialize_sets(url_and_token):
+    # Tests serializing set and frozenset
     bc = sdk_baseclient.SDKBaseClient(url_and_token[0] + "/services/ws", token=url_and_token[1])
     ws_name = f"sdk_baseclient_test_{time.time()}"
     try:
@@ -359,8 +359,6 @@ def test_run_job_no_return(url_and_token, callback):
 
 
 def test_run_job_list_return(url_and_token, callback):
-    # Not many SDK functions that return lists, so we test it here for core / dynamic / SDK
-    # methods
     bc = sdk_baseclient.SDKBaseClient(callback, token=url_and_token[1], timeout=10)
     res = bc.run_job("HelloServiceDeluxe.say_hellos", ["JimBob", "Gengulphus"])
     assert res == [
