@@ -28,7 +28,7 @@ _CHECK_JOB_RETRIES = 3
 
 
 # tested this manually by shortening _EXP_BACKOFF_MS and adding printouts below
-def _get_next_backoff(backoff_index: int = 1):
+def _get_next_backoff(backoff_index: int = 1) -> tuple[int, float]:
     if backoff_index < len(_EXP_BACKOFF_SEC) - 1:
         backoff_index += 1
     return backoff_index, _EXP_BACKOFF_SEC[backoff_index]
